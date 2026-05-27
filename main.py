@@ -20,7 +20,7 @@ NARA_CONSTRUCTION_BID_URL = (
 app = FastAPI(
     title="송원건설 입찰분석 GPTS Actions 서버",
     description="나라장터, 낙찰정보, 한국수자원공사 입찰공고를 분석하기 위한 송원건설 전용 API 서버",
-    version="0.2.1",
+    version="0.2.2",
 )
 
 
@@ -70,8 +70,10 @@ COMPANY_PROFILE = {
 def mask_key(value: Optional[str]) -> str:
     if not value:
         return "not_set"
+
     if len(value) <= 10:
         return "set"
+
     return value[:4] + "****" + value[-4:]
 
 
@@ -79,6 +81,7 @@ def make_date_range(days_back: int = 7, days_forward: int = 14) -> Dict[str, str
     now = datetime.now()
     begin = now - timedelta(days=days_back)
     end = now + timedelta(days=days_forward)
+
     return {
         "begin": begin.strftime("%Y%m%d0000"),
         "end": end.strftime("%Y%m%d2359"),
@@ -88,21 +91,36 @@ def make_date_range(days_back: int = 7, days_forward: int = 14) -> Dict[str, str
 def normalize_items(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     공공데이터 응답에서 item 목록만 안전하게 꺼냅니다.
-    item이 1개일 때 dict로 오는 경우도 있어서 list로 맞춥니다.
+    나라장터 API는 응답 형태가 경우에 따라 다르게 올 수 있어서
+    dict, list, item 구조를 모두 처리합니다.
     """
     response = raw.get("response", {})
     body = response.get("body", {})
-    items = body.get("items", {})
+    items = body.get("items", [])
 
+    # items가 이미 리스트로 오는 경우
+    if isinstance(items, list):
+        return items
+
+    # items가 dict로 오고 그 안에 item이 있는 경우
     if isinstance(items, dict):
         item = items.get("item", [])
-    else:
-        item = []
+
+        if isinstance(item, list):
+            return item
+
+        if isinstance(item, dict):
+            return [item]
+
+    # body 바로 아래 item이 오는 예외 경우
+    item = body.get("item", [])
 
     if isinstance(item, list):
         return item
+
     if isinstance(item, dict):
         return [item]
+
     return []
 
 
@@ -353,6 +371,7 @@ def call_nara_construction_api(
             "total_count": data.get("response", {}).get("body", {}).get("totalCount"),
             "count": len(items),
             "items": items,
+            "debug_body_keys": list(data.get("response", {}).get("body", {}).keys()),
         }
 
     except requests.RequestException as e:
@@ -419,6 +438,7 @@ def nara_bids(
         "request": result["request"],
         "total_count": result.get("total_count"),
         "count": len(simplified),
+        "debug_body_keys": result.get("debug_body_keys"),
         "items": simplified,
     }
 
@@ -457,6 +477,7 @@ def recommend_bids(
             "recommended_count": len(recommended),
             "excluded_or_low_count": len(excluded),
         },
+        "debug_body_keys": result.get("debug_body_keys"),
         "recommended": recommended[:10],
         "excluded_or_low_priority": excluded[:10],
         "notice": "현재는 1차 자동분류입니다. 다음 단계에서 면허제한, 참가가능지역, 기초금액, 첨부파일 분석을 추가합니다.",
