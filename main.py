@@ -20,7 +20,7 @@ NARA_CONSTRUCTION_BID_URL = (
 app = FastAPI(
     title="송원건설 입찰분석 GPTS Actions 서버",
     description="나라장터, 낙찰정보, 한국수자원공사 입찰공고를 분석하기 위한 송원건설 전용 API 서버",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 
@@ -109,10 +109,13 @@ def normalize_items(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 def parse_amount(value: Any) -> Optional[int]:
     if value is None:
         return None
+
     text = str(value)
     only_numbers = re.sub(r"[^0-9]", "", text)
+
     if not only_numbers:
         return None
+
     try:
         return int(only_numbers)
     except ValueError:
@@ -145,10 +148,12 @@ def parse_datetime(value: Any) -> Optional[datetime]:
 
 def get_text(item: Dict[str, Any], keys: List[str]) -> str:
     parts = []
+
     for key in keys:
         value = item.get(key)
         if value:
             parts.append(str(value))
+
     return " ".join(parts)
 
 
@@ -186,15 +191,19 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
     matched_keywords = [
         kw for kw in COMPANY_PROFILE["construction_keywords"] if kw in all_text
     ]
+
     if matched_keywords:
         score += min(20, len(matched_keywords) * 4)
-        reasons.append(f"송원건설 관심 공종 키워드가 포함되어 있습니다: {', '.join(matched_keywords[:5])}")
+        reasons.append(
+            f"송원건설 관심 공종 키워드가 포함되어 있습니다: {', '.join(matched_keywords[:5])}"
+        )
     else:
         score -= 8
         risks.append("공고명 기준으로 토목/배수/포장/상하수도 관련성이 약합니다.")
 
     # 리스크 키워드
     matched_risks = [kw for kw in COMPANY_PROFILE["risk_keywords"] if kw in all_text]
+
     if matched_risks:
         score -= min(15, len(matched_risks) * 3)
         risks.append(f"주의 키워드가 있습니다: {', '.join(matched_risks[:5])}")
@@ -202,8 +211,10 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
     # 마감일 점수
     close_dt = parse_datetime(item.get("bidClseDt"))
     days_left = None
+
     if close_dt:
         days_left = (close_dt - datetime.now()).days
+
         if days_left < 0:
             score -= 30
             risks.append("이미 마감된 공고일 수 있습니다.")
