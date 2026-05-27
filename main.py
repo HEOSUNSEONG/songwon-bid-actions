@@ -14,15 +14,20 @@ DATA_GO_KR_SERVICE_KEY = os.getenv("DATA_GO_KR_SERVICE_KEY")
 
 KST = timezone(timedelta(hours=9))
 
-# 나라장터 입찰공고정보서비스 - 공사조회
-NARA_CONSTRUCTION_BID_URL = (
+# 나라장터 입찰공고정보서비스 - 검색조건 공사조회 우선 사용
+NARA_CONSTRUCTION_BID_SEARCH_URL = (
+    "http://apis.data.go.kr/1230000/BidPublicInfoService04/getBidPblancListInfoCnstwkPPSSrch01"
+)
+
+# 예비용 기존 공사조회 주소
+NARA_CONSTRUCTION_BID_FALLBACK_URL = (
     "http://apis.data.go.kr/1230000/ad/BidPublicInfoService/getBidPblancListInfoCnstwk"
 )
 
 app = FastAPI(
     title="송원건설 입찰분석 GPTS Actions 서버",
     description="나라장터, 낙찰정보, 한국수자원공사 입찰공고를 분석하기 위한 송원건설 전용 API 서버",
-    version="0.3.0",
+    version="0.3.1",
 )
 
 
@@ -46,7 +51,14 @@ COMPANY_PROFILE = {
         "창녕",
         "합천",
     ],
-    "strong_regions": ["김해", "경남", "경상남도", "양산", "창원", "밀양"],
+    "strong_regions": [
+        "김해",
+        "경남",
+        "경상남도",
+        "양산",
+        "창원",
+        "밀양",
+    ],
     "construction_keywords": [
         "토공",
         "토목",
@@ -57,8 +69,11 @@ COMPANY_PROFILE = {
         "하수도",
         "배수",
         "배수로",
+        "배수관",
         "관로",
+        "관거",
         "포장",
+        "확포장",
         "도로",
         "보수",
         "정비",
@@ -68,13 +83,53 @@ COMPANY_PROFILE = {
         "맨홀",
         "우수",
         "오수",
+        "우수관",
+        "오수관",
         "재해복구",
         "개선복구",
         "하천",
         "소하천",
         "구거",
         "농로",
+        "흄관",
+        "암거",
+        "석축",
+        "사면",
+        "법면",
+    ],
+    "core_civil_keywords": [
+        "토공",
+        "토목",
+        "철근콘크리트",
+        "철콘",
+        "상하수도",
+        "상수도",
+        "하수도",
+        "배수",
+        "배수로",
+        "배수관",
+        "관로",
+        "관거",
+        "포장",
         "확포장",
+        "도로",
+        "옹벽",
+        "측구",
+        "맨홀",
+        "우수",
+        "오수",
+        "우수관",
+        "오수관",
+        "하천",
+        "소하천",
+        "구거",
+        "농로",
+        "재해복구",
+        "개선복구",
+        "법면",
+        "사면",
+        "석축",
+        "암거",
     ],
     "risk_keywords": [
         "현장설명",
@@ -98,14 +153,43 @@ COMPANY_PROFILE = {
     ],
     "exclude_keywords": [
         "전기",
+        "전기공사",
         "통신",
+        "통신공사",
         "소방",
+        "소방공사",
         "승강기",
         "엘리베이터",
         "비상발전기",
+        "발전기",
         "방수",
         "옥상방수",
         "철도신호",
+        "LED",
+        "led",
+        "조명",
+        "조명교체",
+        "실습실",
+        "웹툰",
+        "박물관",
+        "전시실",
+        "인테리어",
+        "리모델링",
+        "도장",
+        "창호",
+        "기계설비",
+        "냉난방",
+        "공조",
+        "CCTV",
+        "cctv",
+        "가구",
+        "집기",
+        "냉장",
+        "냉동",
+        "에어컨",
+        "냉난방기",
+        "배관교체",
+        "보일러",
     ],
 }
 
@@ -215,15 +299,8 @@ def parse_datetime(value: Any) -> Optional[datetime]:
     return None
 
 
-def get_text(item: Dict[str, Any], keys: List[str]) -> str:
-    parts = []
-
-    for key in keys:
-        value = item.get(key)
-        if value:
-            parts.append(str(value))
-
-    return " ".join(parts)
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def get_all_text(item: Dict[str, Any]) -> str:
@@ -234,10 +311,6 @@ def get_all_text(item: Dict[str, Any]) -> str:
             values.append(str(value))
 
     return " ".join(values)
-
-
-def normalize_space(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def keyword_matches(item: Dict[str, Any], keyword: str) -> bool:
@@ -255,15 +328,12 @@ def keyword_matches(item: Dict[str, Any], keyword: str) -> bool:
     demand = str(item.get("dminsttNm", "") or "").lower()
     all_text = get_all_text(item).lower()
 
-    # 1순위: 공고명
     if keyword in title:
         return True
 
-    # 2순위: 기관명/수요기관명
     if keyword in agency or keyword in demand:
         return True
 
-    # 3순위: 원본 전체 필드
     if keyword in all_text:
         return True
 
@@ -332,7 +402,7 @@ def get_deadline_info(item: Dict[str, Any]) -> Dict[str, Any]:
 def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     같은 공고가 정정공고/중복공고처럼 여러 번 보일 수 있어
-    공고명 + 수요기관 + 마감일 기준으로 중복 제거합니다.
+    공고명 + 수요기관 + 마감일 + 가격 기준으로 중복 제거합니다.
     """
     seen = set()
     result = []
@@ -422,7 +492,6 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
 
     matched_regions = detect_regions(item)
 
-    # 지역 점수
     if "김해" in all_text:
         score += 25
         reasons.append("김해 관련 공고로 지역 적합도가 매우 높습니다.")
@@ -439,7 +508,6 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
         score -= 15
         risks.append("김해·경남·부산권 공고가 아니어서 지역 적합도가 낮습니다.")
 
-    # 공종 점수
     matched_keywords = [
         kw for kw in COMPANY_PROFILE["construction_keywords"] if kw in all_text
     ]
@@ -453,25 +521,22 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
         score -= 10
         risks.append("공고명 기준으로 토목/배수/포장/상하수도 관련성이 약합니다.")
 
-    # 제외성 키워드
     matched_exclude_keywords = [
         kw for kw in COMPANY_PROFILE["exclude_keywords"] if kw in all_text
     ]
 
     if matched_exclude_keywords:
-        score -= min(25, len(matched_exclude_keywords) * 8)
+        score -= min(30, len(matched_exclude_keywords) * 10)
         risks.append(
-            f"송원건설 주력 공종과 다를 수 있는 키워드가 있습니다: {', '.join(matched_exclude_keywords[:5])}"
+            f"송원건설 주력 공종과 다를 수 있는 키워드가 있습니다: {', '.join(matched_exclude_keywords[:6])}"
         )
 
-    # 리스크 키워드
     matched_risks = [kw for kw in COMPANY_PROFILE["risk_keywords"] if kw in all_text]
 
     if matched_risks:
         score -= min(18, len(matched_risks) * 3)
         risks.append(f"주의 키워드가 있습니다: {', '.join(matched_risks[:6])}")
 
-    # 마감일 점수
     deadline = get_deadline_info(item)
 
     if deadline["is_closed"]:
@@ -490,7 +555,6 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
     else:
         risks.append("마감일시를 해석하지 못했습니다.")
 
-    # 금액 점수
     amount = parse_amount(
         item.get("asignBdgtAmt")
         or item.get("presmptPrce")
@@ -498,7 +562,7 @@ def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
         or item.get("basePrce")
     )
 
-    if amount:
+    if amount is not None and amount > 0:
         if 30_000_000 <= amount <= 300_000_000:
             score += 12
             reasons.append("금액대가 중소 건설사 검토 범위에 들어올 가능성이 있습니다.")
@@ -566,6 +630,34 @@ def simplify_notice(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def request_nara_api(
+    url: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    res = requests.get(url, params=params, timeout=25)
+    res.raise_for_status()
+
+    try:
+        data = res.json()
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "JSON 응답이 아닙니다. 서비스키 Encoding/Decoding 또는 API 응답 형식을 확인해야 합니다.",
+            "status_code": res.status_code,
+            "raw_preview": res.text[:1000],
+        }
+
+    items = normalize_items(data)
+
+    return {
+        "ok": True,
+        "data": data,
+        "items": items,
+        "total_count": data.get("response", {}).get("body", {}).get("totalCount"),
+        "debug_body_keys": list(data.get("response", {}).get("body", {}).keys()),
+    }
+
+
 def call_nara_construction_api(
     keyword: str = "",
     rows: int = 20,
@@ -580,8 +672,6 @@ def call_nara_construction_api(
 
     date_range = make_date_range(days_back=days_back, days_forward=days_forward)
 
-    # 나라장터 결과가 넓게 들어오는 경우가 있어
-    # 실제 요청은 최대 100개까지 가져온 뒤 서버에서 다시 필터링합니다.
     api_rows = min(100, max(rows * 5, rows))
 
     params = {
@@ -597,44 +687,51 @@ def call_nara_construction_api(
     if keyword:
         params["bidNtceNm"] = keyword
 
+    used_url = NARA_CONSTRUCTION_BID_SEARCH_URL
+    used_source = "검색조건 공사조회"
+
     try:
-        res = requests.get(NARA_CONSTRUCTION_BID_URL, params=params, timeout=25)
-        res.raise_for_status()
+        result = request_nara_api(used_url, params)
+
+        # 검색조건 URL이 환경에 따라 막히거나 빈 응답이면 예비 URL로 재시도
+        if not result.get("ok"):
+            raise requests.RequestException(result.get("error", "검색조건 API 실패"))
+
+        # 검색조건 API가 응답은 했지만 item 구조가 비정상일 경우 fallback
+        if result.get("items") is None:
+            raise requests.RequestException("검색조건 API item 파싱 실패")
+
+    except requests.RequestException:
+        used_url = NARA_CONSTRUCTION_BID_FALLBACK_URL
+        used_source = "기존 공사조회 fallback"
 
         try:
-            data = res.json()
-        except ValueError:
+            result = request_nara_api(used_url, params)
+        except requests.RequestException as e:
             return {
                 "ok": False,
-                "error": "JSON 응답이 아닙니다. 서비스키 Encoding/Decoding 또는 API 응답 형식을 확인해야 합니다.",
-                "status_code": res.status_code,
-                "raw_preview": res.text[:1000],
+                "error": str(e),
+                "used_url": used_url,
             }
 
-        items = normalize_items(data)
-
-        return {
-            "ok": True,
-            "request": {
-                "keyword": keyword,
-                "rows": rows,
-                "api_rows": api_rows,
-                "days_back": days_back,
-                "days_forward": days_forward,
-                "inqryBgnDt": date_range["begin"],
-                "inqryEndDt": date_range["end"],
-            },
-            "total_count": data.get("response", {}).get("body", {}).get("totalCount"),
-            "count": len(items),
-            "items": items,
-            "debug_body_keys": list(data.get("response", {}).get("body", {}).keys()),
-        }
-
-    except requests.RequestException as e:
-        return {
-            "ok": False,
-            "error": str(e),
-        }
+    return {
+        "ok": True,
+        "used_source": used_source,
+        "used_url": used_url,
+        "request": {
+            "keyword": keyword,
+            "rows": rows,
+            "api_rows": api_rows,
+            "days_back": days_back,
+            "days_forward": days_forward,
+            "inqryBgnDt": date_range["begin"],
+            "inqryEndDt": date_range["end"],
+        },
+        "total_count": result.get("total_count"),
+        "count": len(result.get("items", [])),
+        "items": result.get("items", []),
+        "debug_body_keys": result.get("debug_body_keys"),
+    }
 
 
 @app.get("/")
@@ -704,7 +801,8 @@ def nara_bids(
 
     return {
         "status": "ok",
-        "source": "나라장터 입찰공고정보서비스 - 공사조회",
+        "source": f"나라장터 입찰공고정보서비스 - 공사조회 ({result.get('used_source')})",
+        "used_url": result.get("used_url"),
         "request": result["request"],
         "total_count_from_api": result.get("total_count"),
         "raw_count_from_api": result.get("count"),
@@ -725,7 +823,8 @@ def recommend_bids(
 ):
     """
     송원건설 기준 추천 공고.
-    검색어, 지역, 마감, 중복을 서버에서 다시 필터링한 뒤 점수화합니다.
+    검색어, 지역, 마감, 중복을 서버에서 다시 필터링한 뒤
+    송원건설 주력 공종이 아닌 공고는 추천에서 제외합니다.
     """
     result = call_nara_construction_api(
         keyword=keyword,
@@ -748,13 +847,46 @@ def recommend_bids(
     simplified = [simplify_notice(item) for item in filtered_items]
     simplified.sort(key=lambda x: x["score"], reverse=True)
 
-    recommended = [item for item in simplified if item["grade"] in ["A", "B", "C"]]
-    excluded = [item for item in simplified if item["grade"] not in ["A", "B", "C"]]
+    recommended = []
+    excluded = []
+
+    for item in simplified:
+        analysis = item.get("analysis", {})
+        matched_keywords = analysis.get("matched_keywords", [])
+        matched_exclude_keywords = analysis.get("matched_exclude_keywords", [])
+
+        has_core_civil_keyword = any(
+            kw in COMPANY_PROFILE["core_civil_keywords"] for kw in matched_keywords
+        )
+
+        has_exclude_keyword = len(matched_exclude_keywords) > 0
+
+        if has_exclude_keyword:
+            item["exclude_reason"] = (
+                "전기/조명/승강기/방수/실습실/기계설비 등 송원건설 주력 공종과 "
+                "맞지 않는 키워드가 포함되어 제외합니다."
+            )
+            excluded.append(item)
+            continue
+
+        if not has_core_civil_keyword:
+            item["exclude_reason"] = (
+                "토목/상하수도/포장/배수/관로/하천/옹벽/측구 등 "
+                "송원건설 주력 공종 키워드가 부족하여 제외합니다."
+            )
+            excluded.append(item)
+            continue
+
+        if item["grade"] in ["A", "B", "C"]:
+            recommended.append(item)
+        else:
+            excluded.append(item)
 
     return {
         "status": "ok",
         "company": COMPANY_PROFILE["company"],
-        "source": "나라장터 입찰공고정보서비스 - 공사조회",
+        "source": f"나라장터 입찰공고정보서비스 - 공사조회 ({result.get('used_source')})",
+        "used_url": result.get("used_url"),
         "summary": {
             "raw_count_from_api": result.get("count"),
             "after_filter_count": len(simplified),
@@ -764,7 +896,7 @@ def recommend_bids(
         "filter_summary": filter_summary,
         "recommended": recommended[:rows],
         "excluded_or_low_priority": excluded[:10],
-        "notice": "현재는 공고명/기관명/지역/마감/금액 기반 1차 자동분류입니다. 다음 단계에서 면허제한, 참가가능지역, 기초금액, 첨부파일 분석을 추가합니다.",
+        "notice": "추천 목록은 송원건설 주력 공종인 토목/상하수도/배수/관로/포장/하천/옹벽/측구 중심으로 필터링합니다. 다음 단계에서 면허제한, 참가가능지역, 기초금액, 첨부파일 분석을 추가합니다.",
     }
 
 
