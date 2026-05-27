@@ -27,7 +27,7 @@ NARA_CONSTRUCTION_BID_FALLBACK_URL = (
 app = FastAPI(
     title="송원건설 입찰분석 GPTS Actions 서버",
     description="나라장터, 낙찰정보, 한국수자원공사 입찰공고를 분석하기 위한 송원건설 전용 API 서버",
-    version="0.3.1",
+    version="0.4.1",
 )
 
 
@@ -220,11 +220,6 @@ def make_date_range(days_back: int = 7, days_forward: int = 14) -> Dict[str, str
 
 
 def normalize_items(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    공공데이터 응답에서 item 목록만 안전하게 꺼냅니다.
-    나라장터 API는 응답 형태가 경우에 따라 다르게 올 수 있어서
-    dict, list, item 구조를 모두 처리합니다.
-    """
     response = raw.get("response", {})
     body = response.get("body", {})
     items = body.get("items", [])
@@ -314,10 +309,6 @@ def get_all_text(item: Dict[str, Any]) -> str:
 
 
 def keyword_matches(item: Dict[str, Any], keyword: str) -> bool:
-    """
-    나라장터 API 검색 결과가 넓게 들어오는 경우가 있어
-    서버에서 다시 검색어 포함 여부를 검사합니다.
-    """
     if not keyword:
         return True
 
@@ -400,10 +391,6 @@ def get_deadline_info(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    같은 공고가 정정공고/중복공고처럼 여러 번 보일 수 있어
-    공고명 + 수요기관 + 마감일 + 가격 기준으로 중복 제거합니다.
-    """
     seen = set()
     result = []
 
@@ -412,8 +399,9 @@ def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         demand = normalize_space(str(item.get("dminsttNm", "") or ""))
         close_date = normalize_space(str(item.get("bidClseDt", "") or ""))
         price = normalize_space(str(item.get("presmptPrce", "") or ""))
+        bid_no = normalize_space(str(item.get("bidNtceNo", "") or ""))
 
-        key = f"{title}|{demand}|{close_date}|{price}"
+        key = f"{bid_no}|{title}|{demand}|{close_date}|{price}"
 
         if key in seen:
             continue
@@ -476,11 +464,6 @@ def apply_local_filters(
 
 
 def score_notice(item: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    송원건설 기준 1차 점수화.
-    아직 면허/첨부파일/기초금액 상세조회 전 단계라서
-    공고명, 기관명, 지역, 마감일, 금액 중심으로 1차 판단합니다.
-    """
     title = str(item.get("bidNtceNm", "") or "")
     agency = str(item.get("ntceInsttNm", "") or "")
     demand = str(item.get("dminsttNm", "") or "")
@@ -693,11 +676,9 @@ def call_nara_construction_api(
     try:
         result = request_nara_api(used_url, params)
 
-        # 검색조건 URL이 환경에 따라 막히거나 빈 응답이면 예비 URL로 재시도
         if not result.get("ok"):
             raise requests.RequestException(result.get("error", "검색조건 API 실패"))
 
-        # 검색조건 API가 응답은 했지만 item 구조가 비정상일 경우 fallback
         if result.get("items") is None:
             raise requests.RequestException("검색조건 API item 파싱 실패")
 
@@ -743,6 +724,25 @@ def root():
     }
 
 
+@app.get("/routes")
+def list_routes():
+    return {
+        "status": "ok",
+        "routes": [
+            "/",
+            "/health",
+            "/config-check",
+            "/routes",
+            "/bids/nara",
+            "/bids/recommend",
+            "/bids/smart-recommend",
+            "/bids/today",
+            "/bids/results",
+            "/bids/water",
+        ],
+    }
+
+
 @app.get("/health")
 def health_check():
     return {
@@ -773,9 +773,6 @@ def nara_bids(
     priority_only: bool = Query(False, description="김해/경남/부산권 우선 지역만 표시"),
     exclude_closed: bool = Query(True, description="마감 지난 공고 제외"),
 ):
-    """
-    나라장터 공사 입찰공고 조회 + 서버 자체 필터링.
-    """
     result = call_nara_construction_api(
         keyword=keyword,
         rows=rows,
@@ -821,11 +818,6 @@ def recommend_bids(
     priority_only: bool = Query(True, description="김해/경남/부산권 우선 지역만 추천"),
     exclude_closed: bool = Query(True, description="마감 지난 공고 제외"),
 ):
-    """
-    송원건설 기준 추천 공고.
-    검색어, 지역, 마감, 중복을 서버에서 다시 필터링한 뒤
-    송원건설 주력 공종이 아닌 공고는 추천에서 제외합니다.
-    """
     result = call_nara_construction_api(
         keyword=keyword,
         rows=rows,
@@ -900,42 +892,12 @@ def recommend_bids(
     }
 
 
-@app.get("/bids/today")
-def bids_today():
-    """
-    오늘 추천 입찰공고.
-    내부적으로 /bids/recommend와 같은 1차 추천 로직을 사용합니다.
-    """
-    return recommend_bids(keyword="", rows=30, priority_only=True, exclude_closed=True)
-
-
-@app.get("/bids/results")
-def nara_results():
-    return {
-        "status": "ready",
-        "source": "나라장터 낙찰정보서비스",
-        "message": "나라장터 낙찰정보 조회 기능은 다음 단계에서 연결합니다.",
-    }
-
-
-@app.get("/bids/water")
-def water_bids():
-    return {
-        "status": "ready",
-        "source": "한국수자원공사 전자조달 입찰공고",
-        "message": "한국수자원공사 입찰공고 조회 기능은 나라장터 테스트 후 연결합니다.",
-    }
 @app.get("/bids/smart-recommend")
 def smart_recommend_bids(
     rows: int = Query(30, ge=1, le=100),
     priority_only: bool = Query(True, description="김해/경남/부산권 우선 지역만 추천"),
     exclude_closed: bool = Query(True, description="마감 지난 공고 제외"),
 ):
-    """
-    송원건설 스마트 추천.
-    주력 공종 키워드를 여러 개 자동 검색해서 합친 뒤
-    중복 제거, 지역 필터, 마감 필터, 제외 키워드 필터를 적용합니다.
-    """
     smart_keywords = [
         "포장",
         "배수",
@@ -976,22 +938,27 @@ def smart_recommend_bids(
             continue
 
         raw_items = result.get("items", [])
-        all_raw_items.extend(raw_items)
+
+        matched_items = [
+            item for item in raw_items
+            if keyword_matches(item, keyword)
+        ]
+
+        all_raw_items.extend(matched_items)
 
         keyword_results.append(
             {
                 "keyword": keyword,
                 "ok": True,
                 "raw_count": len(raw_items),
+                "matched_count": len(matched_items),
                 "total_count_from_api": result.get("total_count"),
                 "used_source": result.get("used_source"),
             }
         )
 
-    # 키워드 전체 결과 중복 제거
     all_raw_items = dedupe_items(all_raw_items)
 
-    # 지역, 마감, 중복 필터
     filtered_items, filter_summary = apply_local_filters(
         all_raw_items,
         keyword="",
@@ -1045,7 +1012,7 @@ def smart_recommend_bids(
         "searched_keywords": smart_keywords,
         "keyword_results": keyword_results,
         "summary": {
-            "raw_merged_count": len(all_raw_items),
+            "raw_keyword_matched_count": len(all_raw_items),
             "after_filter_count": len(simplified),
             "recommended_count": len(recommended),
             "excluded_or_low_count": len(excluded),
@@ -1053,5 +1020,28 @@ def smart_recommend_bids(
         "filter_summary": filter_summary,
         "recommended": recommended[:rows],
         "excluded_or_low_priority": excluded[:10],
-        "notice": "스마트 추천은 송원건설 주력 공종 키워드를 여러 개 자동 검색해 합산한 뒤 추천합니다.",
+        "notice": "스마트 추천은 송원건설 주력 공종 키워드가 실제로 포함된 공고만 합산한 뒤 추천합니다.",
+    }
+
+
+@app.get("/bids/today")
+def bids_today():
+    return smart_recommend_bids(rows=30, priority_only=True, exclude_closed=True)
+
+
+@app.get("/bids/results")
+def nara_results():
+    return {
+        "status": "ready",
+        "source": "나라장터 낙찰정보서비스",
+        "message": "나라장터 낙찰정보 조회 기능은 다음 단계에서 연결합니다.",
+    }
+
+
+@app.get("/bids/water")
+def water_bids():
+    return {
+        "status": "ready",
+        "source": "한국수자원공사 전자조달 입찰공고",
+        "message": "한국수자원공사 입찰공고 조회 기능은 나라장터 테스트 후 연결합니다.",
     }
