@@ -925,3 +925,133 @@ def water_bids():
         "source": "한국수자원공사 전자조달 입찰공고",
         "message": "한국수자원공사 입찰공고 조회 기능은 나라장터 테스트 후 연결합니다.",
     }
+@app.get("/bids/smart-recommend")
+def smart_recommend_bids(
+    rows: int = Query(30, ge=1, le=100),
+    priority_only: bool = Query(True, description="김해/경남/부산권 우선 지역만 추천"),
+    exclude_closed: bool = Query(True, description="마감 지난 공고 제외"),
+):
+    """
+    송원건설 스마트 추천.
+    주력 공종 키워드를 여러 개 자동 검색해서 합친 뒤
+    중복 제거, 지역 필터, 마감 필터, 제외 키워드 필터를 적용합니다.
+    """
+    smart_keywords = [
+        "포장",
+        "배수",
+        "배수로",
+        "상하수도",
+        "관로",
+        "도로",
+        "하천",
+        "소하천",
+        "옹벽",
+        "측구",
+        "맨홀",
+        "농로",
+        "재해복구",
+        "정비",
+        "보수",
+    ]
+
+    all_raw_items = []
+    keyword_results = []
+
+    for keyword in smart_keywords:
+        result = call_nara_construction_api(
+            keyword=keyword,
+            rows=20,
+            days_back=7,
+            days_forward=21,
+        )
+
+        if not result.get("ok"):
+            keyword_results.append(
+                {
+                    "keyword": keyword,
+                    "ok": False,
+                    "error": result.get("error"),
+                }
+            )
+            continue
+
+        raw_items = result.get("items", [])
+        all_raw_items.extend(raw_items)
+
+        keyword_results.append(
+            {
+                "keyword": keyword,
+                "ok": True,
+                "raw_count": len(raw_items),
+                "total_count_from_api": result.get("total_count"),
+                "used_source": result.get("used_source"),
+            }
+        )
+
+    # 키워드 전체 결과 중복 제거
+    all_raw_items = dedupe_items(all_raw_items)
+
+    # 지역, 마감, 중복 필터
+    filtered_items, filter_summary = apply_local_filters(
+        all_raw_items,
+        keyword="",
+        priority_only=priority_only,
+        exclude_closed=exclude_closed,
+        remove_duplicates=True,
+    )
+
+    simplified = [simplify_notice(item) for item in filtered_items]
+    simplified.sort(key=lambda x: x["score"], reverse=True)
+
+    recommended = []
+    excluded = []
+
+    for item in simplified:
+        analysis = item.get("analysis", {})
+        matched_keywords = analysis.get("matched_keywords", [])
+        matched_exclude_keywords = analysis.get("matched_exclude_keywords", [])
+
+        has_core_civil_keyword = any(
+            kw in COMPANY_PROFILE["core_civil_keywords"] for kw in matched_keywords
+        )
+
+        has_exclude_keyword = len(matched_exclude_keywords) > 0
+
+        if has_exclude_keyword:
+            item["exclude_reason"] = (
+                "전기/조명/승강기/방수/실습실/기계설비 등 송원건설 주력 공종과 "
+                "맞지 않는 키워드가 포함되어 제외합니다."
+            )
+            excluded.append(item)
+            continue
+
+        if not has_core_civil_keyword:
+            item["exclude_reason"] = (
+                "토목/상하수도/포장/배수/관로/하천/옹벽/측구 등 "
+                "송원건설 주력 공종 키워드가 부족하여 제외합니다."
+            )
+            excluded.append(item)
+            continue
+
+        if item["grade"] in ["A", "B", "C"]:
+            recommended.append(item)
+        else:
+            excluded.append(item)
+
+    return {
+        "status": "ok",
+        "company": COMPANY_PROFILE["company"],
+        "source": "나라장터 입찰공고정보서비스 - 스마트 추천",
+        "searched_keywords": smart_keywords,
+        "keyword_results": keyword_results,
+        "summary": {
+            "raw_merged_count": len(all_raw_items),
+            "after_filter_count": len(simplified),
+            "recommended_count": len(recommended),
+            "excluded_or_low_count": len(excluded),
+        },
+        "filter_summary": filter_summary,
+        "recommended": recommended[:rows],
+        "excluded_or_low_priority": excluded[:10],
+        "notice": "스마트 추천은 송원건설 주력 공종 키워드를 여러 개 자동 검색해 합산한 뒤 추천합니다.",
+    }
